@@ -1,11 +1,8 @@
 """
-NSE Equal-Weight Index Scraper
+yindex Equal-Weight Index Scraper
 Pulls historical + latest closing prices via yfinance and loads to PostgreSQL.
-Computes index values starting at 100 from base_date (2025-01-02).
+Computes index values starting at 100 from base_date (2025-01-02)
 
-Usage:
-    python scraper.py             # fetch latest prices + recompute index
-    python scraper.py --backfill  # pull full history from base_date
 """
 
 import os
@@ -32,11 +29,12 @@ BASE_VALUE = Decimal("100")
 
 def get_conn():
     return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
+        host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT", 5432)),
-        dbname=os.getenv("DB_NAME", "nse_index"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", ""),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        sslmode="require"     
     )
 
 
@@ -47,13 +45,22 @@ def get_stocks(cur) -> list[dict]:
 
 def upsert_prices(cur, stock_id: int, df: pd.DataFrame):
     """Insert or update daily closing prices for a single stock."""
-    rows = [
-        (stock_id, idx.date(), float(row["Close"]))
-        for idx, row in df.iterrows()
-        if not pd.isna(row["Close"])
-    ]
+    # Handle yfinance MultiIndex columns e.g. ('Close', 'AAPL')
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    rows = []
+    for idx, row in df.iterrows():
+        try:
+            close = float(row["Close"])
+            if not pd.isna(close):
+                rows.append((stock_id, idx.date(), close))
+        except (TypeError, ValueError):
+            continue
+
     if not rows:
         return 0
+
     psycopg2.extras.execute_values(
         cur,
         """
