@@ -2,8 +2,8 @@ name: Daily Scraper
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5'   # 21:00 UTC = 4PM EST Mon–Fri
-  workflow_dispatch:         # allows manual trigger
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -17,9 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          cd scraper
-          pip install -r requirements.txt
+        run: pip install -r scraper/requirements.txt
 
       - name: Run scraper
         env:
@@ -29,6 +27,4 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        run: |
-          cd scraper
-          python3 scraper.py
+        run: python3 scraper/scraper.py
