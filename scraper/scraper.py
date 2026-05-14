@@ -28,14 +28,7 @@ BASE_VALUE = Decimal("100")
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT", 5432)),
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        sslmode="require"     
-    )
+    return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 
 def get_stocks(cur) -> list[dict]:
