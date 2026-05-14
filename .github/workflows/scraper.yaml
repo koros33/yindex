@@ -20,11 +20,11 @@ jobs:
         run: pip install -r scraper/requirements.txt
 
       - name: Run scraper
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        run: python3 scraper/scraper.py
+  env:
+    DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    DB_HOST: ${{ secrets.DB_HOST }}
+    DB_PORT: ${{ secrets.DB_PORT || '5432' }}
+    DB_NAME: ${{ secrets.DB_NAME }}
+    DB_USER: ${{ secrets.DB_USER }}
+    DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  run: python3 scraper/scraper.py
