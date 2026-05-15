@@ -43,17 +43,13 @@ def get_conn():
     log.info("DATABASE_URL found (length: %d)", len(db_url))
 
     try:
-        # Force proper parsing + Neon requirements
+        # Clean connection for Neon
         conn = psycopg2.connect(
-            db_url,
+            db_url,                    # ← Just pass the URL directly
             sslmode="require",
-            connect_timeout=20,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5
+            connect_timeout=30
         )
-        log.info("✅ Successfully connected to Neon PostgreSQL")
+        log.info("✅ Successfully connected to Neon DB")
         return conn
     except Exception as e:
         log.error("Connection failed: %s", e)
