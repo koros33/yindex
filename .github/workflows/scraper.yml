@@ -28,10 +28,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          echo "🔍 Starting scraper..."
-          echo "📡 DATABASE_URL configured: ${{ secrets.DATABASE_URL != '' }}"
-          echo "📡 URL prefix: ${DATABASE_URL:0:70}..."
-          echo "📡 Length of DATABASE_URL: ${#DATABASE_URL}"
+          echo "🔍 Debug Secrets Step"
+          echo "📡 Secret exists (GitHub context): ${{ secrets.DATABASE_URL != '' }}"
+          echo "📡 Env var length: ${#DATABASE_URL}"
+          echo "📡 First 80 chars: ${DATABASE_URL:0:80}..."
 
       - name: Run Scraper
         working-directory: ./scraper
