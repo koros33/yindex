@@ -26,7 +26,7 @@ jobs:
 
       - name: Debug Secrets
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DBSECRETS }}
         run: |
           echo "🔍 Debug Secrets Step"
           echo "📡 Secret exists (GitHub context): ${{ secrets.DATABASE_URL != '' }}"
@@ -36,5 +36,5 @@ jobs:
       - name: Run Scraper
         working-directory: ./scraper
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DBSECRETS }}
         run: python scraper.py
