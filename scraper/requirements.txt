@@ -1,5 +1,0 @@
-yfinance>=0.2.40
-psycopg2-binary>=2.9.9
-pandas>=2.0.0
-python-dotenv>=1.0.0
-pytest>=8.0.0
