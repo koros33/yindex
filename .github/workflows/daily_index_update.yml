@@ -1,0 +1,37 @@
+# .github/workflows/daily-index-update.yml
+
+name: Daily Index Update
+
+on:
+  schedule:
+    - cron: '30 21 * * *'     # Runs at 00:30 EAT (Best time)
+  workflow_dispatch:          # You can still trigger manually anytime
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Install dependencies
+        run: go mod tidy
+
+      - name: Run Daily Index Updater
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          echo "========================================"
+          echo "🕒 Starting Daily Update - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "📍 Location: After US Market Close"
+          echo "========================================"
+          go run cmd/daily-updater/main.go
+        shell: bash
