@@ -1,16 +1,15 @@
 # .github/workflows/daily-index-update.yml
-
 name: Daily Index Update
 
 on:
   schedule:
-    - cron: '30 21 * * *'     # Runs at 00:30 EAT (Best time)
-  workflow_dispatch:          # You can still trigger manually anytime
+    - cron: '0 1 * * 2-6'    # 1:00 AM UTC, Tue-Sat = 4:00 AM EAT
+                              # Covers Mon-Fri US closes (data ready ~2hrs after close)
+  workflow_dispatch:          # Manual trigger anytime
 
 jobs:
   update:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
