@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	ratelimit "github.com/koros33/yindex/internal/middleware"
 	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -48,17 +49,24 @@ func main() {
 	stockH := &handlers.StockHandler{DB: db}
 
 	// ── Router ────────────────────────────────────────────────────────────────
+	rl := ratelimit.NewRateLimiter(60)
 	r := chi.NewRouter()
 
 	// Global middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+		r.Use(rl.Middleware)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type"},
 	}))
+
+	frontendFS := http.FileServer(http.Dir("./frontend"))
+	r.Handle("/*", http.StripPrefix("/", frontendFS))
+
+
 
 	// Routes
 	r.Route("/api", func(r chi.Router) {

@@ -1,4 +1,9 @@
 tests/output/
 *.csv
 .env
-*.env
+*.env# Frontend
+frontend/
+dashboard/
+*.pyc
+__pycache__/
+.env
