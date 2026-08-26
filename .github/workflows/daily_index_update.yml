@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r cmd/daily-updater/requirements.txt
 
       - name: Run NSE scraper
         run: python scrape_nse_data.py data/nse_dividend_screen(1).csv
