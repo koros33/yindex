@@ -1,5 +1,6 @@
 tests/output/
 *.csv
+!cmd/daily-updater/nse_dividend_screen.csv
 .env
 *.env# Frontend
 frontend/
@@ -7,4 +8,3 @@ dashboard/
 *.pyc
 __pycache__/
 .env
-.csv
