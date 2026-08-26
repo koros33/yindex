@@ -20,7 +20,7 @@ jobs:
         run: pip install -r cmd/daily-updater/requirements.txt
 
       - name: Run NSE scraper
-        run: python cmd/daily-updater/scrape_nse_data.py nse_dividend_screen.csv
+        run: python cmd/daily-updater/scrape_nse_data.py cmd/daily-updater/nse_dividend_screen.csv
 
       - name: Show updated CSV
         run: |
