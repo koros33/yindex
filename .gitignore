@@ -7,3 +7,4 @@ dashboard/
 *.pyc
 __pycache__/
 .env
+.csv
