@@ -1,28 +1,30 @@
-name: NSE Scraper
+name: NSE Dividend Index Daily Update
 
 on:
-  workflow_dispatch:
+  schedule:
+    # Runs Mon-Fri at 6:00 PM EAT (15:00 UTC)
+    # NSE closes at 3:00 PM EAT, gives 3hrs for prices to settle
+    - cron: '0 15 * * 1-5'
+  workflow_dispatch: # allow manual trigger
 
 jobs:
-  scrape:
+  update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: "3.12"
+          go-version: '1.22'
 
-      - name: Install dependencies
-        run: pip install -r cmd/daily-updater/requirements.txt
+      - name: Build daily updater
+        run: go build -o updater ./cmd/daily-updater/main.go
 
-      - name: Run NSE scraper
-        run: python cmd/daily-updater/scrape_nse_data.py cmd/daily-updater/nse_dividend_screen.csv
-
-      - name: Show updated CSV
-        run: |
-          echo "Scraper completed"
-          head -5 nse_dividend_screen.csv
+      - name: Run daily updater
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MANSA_API_KEY: ${{ secrets.MANSA_API_KEY }}
+        run: ./updater
