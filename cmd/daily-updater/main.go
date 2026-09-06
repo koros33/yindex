@@ -21,7 +21,7 @@ const (
 	MANSA_BASE_URL  = "https://mansaapi.com/api/v1/markets/exchanges/NSE/stocks"
 	BASE_DATE       = "2026-08-31"
 	BASE_INDEX      = 100.0
-	REQUEST_TIMEOUT = 30 * time.Second
+	REQUEST_TIMEOUT = 60 * time.Second
 )
 
 // Rebalance dates — yield weights recalculated from fundamentals
@@ -81,6 +81,12 @@ func main() {
 
 	slog.Info("🚀 NSE Dividend Index updater starting...")
 
+	// Skip weekends — NSE does not trade on weekends
+	if wd := time.Now().UTC().Weekday(); wd == time.Saturday || wd == time.Sunday {
+		slog.Info("📅 Weekend — NSE closed, skipping update", "day", wd)
+		return
+	}
+
 	today := time.Now().UTC().Format("2006-01-02")
 
 	// ── Step 1: Insert base date row (100.0) if not exists ───────────────────
@@ -112,9 +118,22 @@ func main() {
 		return
 	}
 
-	if err := calculateAndSaveIndex(ctx, db, today); err != nil {
-		slog.Error("Index calculation failed", "error", err)
+	// ── Step 4: Backfill any missing index dates ─────────────────────────────
+	missing, err := getMissingIndexDates(ctx, db)
+	if err != nil {
+		slog.Error("Missing dates check failed", "error", err)
 		os.Exit(1)
+	}
+
+	if len(missing) == 0 {
+		slog.Info("✅ Index already up to date")
+	} else {
+		slog.Info("📅 Backfilling missing index dates", "count", len(missing), "dates", missing)
+		for _, date := range missing {
+			if err := calculateAndSaveIndex(ctx, db, date); err != nil {
+				slog.Error("Index calc failed", "date", date, "error", err)
+			}
+		}
 	}
 
 	slog.Info("✅ Daily update complete", "date", today)
@@ -398,3 +417,34 @@ func getPricesOnDate(ctx context.Context, db *pgxpool.Pool, date string) (map[st
 	}
 	return prices, nil
 }
+
+// ── getMissingIndexDates ──────────────────────────────────────────────────────
+
+func getMissingIndexDates(ctx context.Context, db *pgxpool.Pool) ([]string, error) {
+	rows, err := db.Query(ctx, `
+		SELECT DISTINCT p.price_date
+		FROM prices p
+		JOIN stocks s ON s.id = p.stock_id
+		WHERE s.active = TRUE
+		  AND p.price_date > $1
+		  AND p.price_date NOT IN (
+			SELECT price_date FROM index_values
+		  )
+		ORDER BY p.price_date ASC
+	`, BASE_DATE)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var dates []string
+	for rows.Next() {
+		var d time.Time
+		if err := rows.Scan(&d); err != nil {
+			continue
+		}
+		dates = append(dates, d.Format("2006-01-02"))
+	}
+	return dates, nil
+}
+
