@@ -24,7 +24,15 @@ jobs:
         run: go build -o updater ./cmd/daily-updater/main.go
 
       - name: Run daily updater
+        continue-on-error: true
+        timeout-minutes: 5
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MANSA_API_KEY: ${{ secrets.MANSA_API_KEY }}
-        run: ./updater
+        run: |
+         for i in 1 2 3; do
+          echo "Attempt $i..."
+          ./updater && break
+          echo "Attempt $i failed, waiting 30s..."
+          sleep 30
+         done
