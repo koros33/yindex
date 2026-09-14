@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
@@ -19,19 +20,33 @@ import (
 
 const (
 	MANSA_BASE_URL  = "https://mansaapi.com/api/v1/markets/exchanges/NSE/stocks"
-	BASE_DATE       = "2026-08-31"
+	DATE_LAYOUT     = "2006-01-02"
+	BASE_DATE       = "2026-09-14" // inception — index = 100 here
 	BASE_INDEX      = 100.0
 	REQUEST_TIMEOUT = 60 * time.Second
 )
 
-// Rebalance dates — yield weights recalculated from fundamentals
+// Rebalance dates — the ONLY dates on which constituent weights are allowed
+// to change. Between these, index_shares are held fixed so the index moves
+// purely on price, per whitepaper §4.4/§4.5. First entry MUST equal BASE_DATE
+// (inception is itself a rebalance). Kept as an explicit list rather than a
+// generated +3-months schedule so odd calendar cases (holidays, etc.) can be
+// hand-adjusted before they happen.
 var REBALANCE_DATES = []string{
-	"2026-08-31", // inception
-	"2027-03-01",
-	"2027-09-01",
-	"2028-03-01",
-	"2028-09-01",
+	BASE_DATE,    // inception
+	"2026-12-14",
+	"2027-03-14",
+	"2027-06-14",
+	"2027-09-14",
+	"2027-12-14",
+	"2028-03-14",
 }
+
+// Note on universe: the `stocks` table is assumed pre-filtered upstream to
+// exactly the screened constituent set (payout <80%, 3yr continuity, etc.) —
+// this file does not re-apply that screen. It only excludes rows with
+// dividend_yield_ttm <= 0 as a data-sanity guard against divide-by-zero, not
+// as a selection rule.
 
 // ── Mansa API response ────────────────────────────────────────────────────────
 
@@ -79,23 +94,26 @@ func main() {
 	}
 	defer db.Close()
 
-	slog.Info("🚀 NSE Dividend Index updater starting...")
+	slog.Info("🚀 NSE Dividend Composite (IDCI) updater starting...", "base_date", BASE_DATE)
 
-	// Skip weekends — NSE does not trade on weekends
+	// Skip weekends — NSE does not trade on weekends.
+	// NOTE: this does NOT account for Kenyan public holidays. On a holiday,
+	// Mansa may return the prior close as if it were fresh, which will look
+	// like a flat/stale price in the series. Add a holiday calendar check
+	// here before this runs unattended for long stretches.
 	if wd := time.Now().UTC().Weekday(); wd == time.Saturday || wd == time.Sunday {
 		slog.Info("📅 Weekend — NSE closed, skipping update", "day", wd)
 		return
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
+	today := time.Now().UTC().Format(DATE_LAYOUT)
 
-	// ── Step 1: Insert base date row (100.0) if not exists ───────────────────
-	if err := insertBaseIfMissing(ctx, db); err != nil {
-		slog.Error("Base date insert failed", "error", err)
-		os.Exit(1)
+	if today < BASE_DATE {
+		slog.Info("⏳ Before base date — collecting prices only, no index calc yet",
+			"today", today, "base_date", BASE_DATE)
 	}
 
-	// ── Step 2: Fetch today's prices from Mansa ──────────────────────────────
+	// ── Step 1: Fetch & save today's prices from Mansa ───────────────────────
 	slog.Info("📥 Fetching NSE prices from Mansa API...")
 	stocks, err := fetchMansaPrices(apiKey)
 	if err != nil {
@@ -104,7 +122,6 @@ func main() {
 	}
 	slog.Info("✅ Fetched prices", "count", len(stocks))
 
-	// ── Step 3: Save today's prices to DB ────────────────────────────────────
 	saved, err := savePrices(ctx, db, stocks, today)
 	if err != nil {
 		slog.Error("Price save failed", "error", err)
@@ -112,13 +129,13 @@ func main() {
 	}
 	slog.Info("💾 Prices saved", "rows", saved)
 
-	// ── Step 4: Calculate and save index value for today ─────────────────────
-	if today <= BASE_DATE {
-		slog.Info("📊 Today is base date — index already set to 100")
-		return
+	if today < BASE_DATE {
+		return // nothing to index yet
 	}
 
-	// ── Step 4: Backfill any missing index dates ─────────────────────────────
+	// ── Step 2: Backfill any missing index dates, in order ───────────────────
+	// Order matters: rebalances must be applied sequentially so each date's
+	// active index_shares reflect every rebalance that preceded it.
 	missing, err := getMissingIndexDates(ctx, db)
 	if err != nil {
 		slog.Error("Missing dates check failed", "error", err)
@@ -127,42 +144,20 @@ func main() {
 
 	if len(missing) == 0 {
 		slog.Info("✅ Index already up to date")
-	} else {
-		slog.Info("📅 Backfilling missing index dates", "count", len(missing), "dates", missing)
-		for _, date := range missing {
-			if err := calculateAndSaveIndex(ctx, db, date); err != nil {
-				slog.Error("Index calc failed", "date", date, "error", err)
-			}
+		return
+	}
+
+	slog.Info("📅 Processing index dates", "count", len(missing), "dates", missing)
+	for _, date := range missing {
+		if err := calculateAndSaveIndex(ctx, db, date); err != nil {
+			slog.Error("Index calc failed", "date", date, "error", err)
+			// stop rather than continue — a later date's correctness depends
+			// on this one if it happens to be a rebalance date
+			os.Exit(1)
 		}
 	}
 
 	slog.Info("✅ Daily update complete", "date", today)
-}
-
-// ── insertBaseIfMissing ───────────────────────────────────────────────────────
-
-func insertBaseIfMissing(ctx context.Context, db *pgxpool.Pool) error {
-	var count int
-	err := db.QueryRow(ctx,
-		"SELECT COUNT(*) FROM index_values WHERE price_date = $1", BASE_DATE,
-	).Scan(&count)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil // already exists
-	}
-
-	_, err = db.Exec(ctx, `
-		INSERT INTO index_values (price_date, index_value, daily_change)
-		VALUES ($1, $2, 0)
-		ON CONFLICT (price_date) DO NOTHING
-	`, BASE_DATE, BASE_INDEX)
-	if err != nil {
-		return err
-	}
-	slog.Info("📌 Base date row inserted", "date", BASE_DATE, "value", BASE_INDEX)
-	return nil
 }
 
 // ── fetchMansaPrices ──────────────────────────────────────────────────────────
@@ -196,7 +191,6 @@ func fetchMansaPrices(apiKey string) ([]MansaStock, error) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
-
 	if !result.Success {
 		return nil, fmt.Errorf("mansa API returned success=false")
 	}
@@ -233,123 +227,61 @@ func savePrices(ctx context.Context, db *pgxpool.Pool, stocks []MansaStock, date
 	return saved, nil
 }
 
-// ── calculateAndSaveIndex ─────────────────────────────────────────────────────
+// ── isRebalanceDate ────────────────────────────────────────────────────────────
 
-func calculateAndSaveIndex(ctx context.Context, db *pgxpool.Pool, today string) error {
-	// Get yield weights from most recent fundamentals
-	weights, err := getYieldWeights(ctx, db)
-	if err != nil {
-		return fmt.Errorf("yield weights: %w", err)
-	}
-	if len(weights) == 0 {
-		return fmt.Errorf("no fundamentals found — run INSERT fundamentals first")
-	}
-
-	// Get base prices (prices on BASE_DATE)
-	basePrices, err := getPricesOnDate(ctx, db, BASE_DATE)
-	if err != nil {
-		return fmt.Errorf("base prices: %w", err)
-	}
-
-	// Get today's prices
-	todayPrices, err := getPricesOnDate(ctx, db, today)
-	if err != nil {
-		return fmt.Errorf("today prices: %w", err)
-	}
-
-	if len(todayPrices) == 0 {
-		slog.Warn("No prices for today yet — skipping index calc", "date", today)
-		return nil
-	}
-
-	// Calculate index value
-	// Index(t) = 100 × Σ(yield_weight_i × price_i(t) / price_i(BASE_DATE))
-	var indexValue float64
-	var totalWeightUsed float64
-	var missing []string
-
-	for ticker, weight := range weights {
-		basePrice, hasBase := basePrices[ticker]
-		todayPrice, hasToday := todayPrices[ticker]
-
-		if !hasBase || basePrice == 0 {
-			missing = append(missing, ticker+"(no base)")
-			continue
+func isRebalanceDate(date string) bool {
+	for _, d := range REBALANCE_DATES {
+		if d == date {
+			return true
 		}
-		if !hasToday || todayPrice == 0 {
-			missing = append(missing, ticker+"(no today)")
-			continue
-		}
-
-		priceRelative := todayPrice / basePrice
-		indexValue += weight * priceRelative
-		totalWeightUsed += weight
 	}
-
-	if totalWeightUsed == 0 {
-		return fmt.Errorf("no valid stocks for index calculation")
-	}
-
-	if len(missing) > 0 {
-		slog.Warn("Some stocks skipped", "tickers", missing)
-	}
-
-	// Renormalize if any stocks were skipped
-	if totalWeightUsed < 1.0 {
-		indexValue = indexValue / totalWeightUsed
-	}
-
-	indexValue *= BASE_INDEX
-
-	// Get previous index value for daily change
-	var prevValue float64
-	err = db.QueryRow(ctx, `
-		SELECT index_value FROM index_values
-		WHERE price_date < $1
-		ORDER BY price_date DESC
-		LIMIT 1
-	`, today).Scan(&prevValue)
-	if err != nil {
-		prevValue = BASE_INDEX
-	}
-	dailyChange := indexValue - prevValue
-
-	// Save to index_values
-	_, err = db.Exec(ctx, `
-		INSERT INTO index_values (price_date, index_value, daily_change)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (price_date) DO UPDATE
-			SET index_value = EXCLUDED.index_value,
-			    daily_change = EXCLUDED.daily_change
-	`, today, indexValue, dailyChange)
-	if err != nil {
-		return fmt.Errorf("index save: %w", err)
-	}
-
-	slog.Info("📊 Index calculated",
-		"date", today,
-		"value", fmt.Sprintf("%.4f", indexValue),
-		"change", fmt.Sprintf("%+.4f", dailyChange),
-		"stocks_used", len(weights)-len(missing),
-	)
-	return nil
+	return false
 }
 
-// ── getYieldWeights ───────────────────────────────────────────────────────────
+// previousRebalanceDate returns the latest rebalance date strictly BEFORE the
+// given date, or "" if none (i.e. date is at or before inception).
+func previousRebalanceDate(date string) string {
+	prev := ""
+	for _, d := range REBALANCE_DATES {
+		if d < date {
+			prev = d
+		} else {
+			break
+		}
+	}
+	return prev
+}
 
-func getYieldWeights(ctx context.Context, db *pgxpool.Pool) (map[string]float64, error) {
-	// Get most recent fundamentals per stock
+// activeRebalanceDate returns the latest rebalance date AT OR BEFORE the
+// given date — i.e. which weighting period `date` falls into.
+func activeRebalanceDate(date string) string {
+	active := ""
+	for _, d := range REBALANCE_DATES {
+		if d <= date {
+			active = d
+		} else {
+			break
+		}
+	}
+	return active
+}
+
+// ── getYieldWeightsAsOf ────────────────────────────────────────────────────────
+
+// getYieldWeightsAsOf returns yield weights using only fundamentals known
+// as of asOfDate (as_of_date <= asOfDate, most recent per stock). This is
+// what makes backfilled/rebalanced dates point-in-time correct instead of
+// leaking future data into past index values.
+func getYieldWeightsAsOf(ctx context.Context, db *pgxpool.Pool, asOfDate string) (map[string]float64, error) {
 	rows, err := db.Query(ctx, `
-		SELECT s.ticker, f.dividend_yield_ttm
+		SELECT DISTINCT ON (s.ticker) s.ticker, f.dividend_yield_ttm
 		FROM fundamentals f
 		JOIN stocks s ON s.id = f.stock_id
 		WHERE s.active = TRUE
-		  AND f.as_of_date = (
-			SELECT MAX(as_of_date) FROM fundamentals f2
-			WHERE f2.stock_id = f.stock_id
-		  )
+		  AND f.as_of_date <= $1
 		  AND f.dividend_yield_ttm > 0
-	`)
+		ORDER BY s.ticker, f.as_of_date DESC
+	`, asOfDate)
 	if err != nil {
 		return nil, err
 	}
@@ -367,28 +299,17 @@ func getYieldWeights(ctx context.Context, db *pgxpool.Pool) (map[string]float64,
 		yields[ticker] = yield
 		totalYield += yield
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if totalYield == 0 {
-		return nil, fmt.Errorf("total yield is zero")
+		return nil, fmt.Errorf("total yield is zero as of %s", asOfDate)
 	}
 
-	// Normalize to weights
-	weights := make(map[string]float64)
+	weights := make(map[string]float64, len(yields))
 	for ticker, yield := range yields {
 		weights[ticker] = yield / totalYield
 	}
-
-	// Log weight table
-	type tw struct{ ticker string; weight float64 }
-	var sorted []tw
-	for t, w := range weights {
-		sorted = append(sorted, tw{t, w})
-	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].weight > sorted[j].weight })
-	for _, s := range sorted {
-		slog.Info("⚖️  Weight", "ticker", s.ticker, "weight_pct", fmt.Sprintf("%.3f%%", s.weight*100))
-	}
-
 	return weights, nil
 }
 
@@ -415,7 +336,262 @@ func getPricesOnDate(ctx context.Context, db *pgxpool.Pool, date string) (map[st
 		}
 		prices[ticker] = price
 	}
-	return prices, nil
+	return prices, rows.Err()
+}
+
+// ── stockID ────────────────────────────────────────────────────────────────────
+
+func stockID(ctx context.Context, db *pgxpool.Pool, ticker string) (int, error) {
+	var id int
+	err := db.QueryRow(ctx, `SELECT id FROM stocks WHERE ticker = $1 AND active = TRUE`, ticker).Scan(&id)
+	return id, err
+}
+
+// ── setIndexShares ────────────────────────────────────────────────────────────
+
+// setIndexShares computes and stores index_shares for a rebalance date, given
+// the index value in effect at the moment of rebalance (indexValueAtRebalance)
+// and that date's closing prices. This is the "index share" mechanism from
+// whitepaper §4.4:
+//
+//	S_i = ( w_i × IndexValue ) / P_i
+//
+// which fixes weights until the next rebalance while keeping the index level
+// continuous across the reset (no jump on the rebalance date itself).
+func setIndexShares(ctx context.Context, db *pgxpool.Pool, rebalanceDate string, indexValueAtRebalance float64) error {
+	weights, err := getYieldWeightsAsOf(ctx, db, rebalanceDate)
+	if err != nil {
+		return fmt.Errorf("yield weights as of %s: %w", rebalanceDate, err)
+	}
+	prices, err := getPricesOnDate(ctx, db, rebalanceDate)
+	if err != nil {
+		return fmt.Errorf("prices on %s: %w", rebalanceDate, err)
+	}
+
+	type row struct {
+		ticker string
+		weight float64
+	}
+	var sorted []row
+	for t, w := range weights {
+		sorted = append(sorted, row{t, w})
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].weight > sorted[j].weight })
+
+	var missing []string
+	var totalWeightUsed float64
+	type shareRow struct {
+		ticker  string
+		weight  float64
+		shares  float64
+	}
+	var toInsert []shareRow
+
+	for _, r := range sorted {
+		price, ok := prices[r.ticker]
+		if !ok || price <= 0 {
+			missing = append(missing, r.ticker)
+			continue
+		}
+		shares := (r.weight * indexValueAtRebalance) / price
+		toInsert = append(toInsert, shareRow{r.ticker, r.weight, shares})
+		totalWeightUsed += r.weight
+	}
+
+	if len(missing) > 0 {
+		slog.Warn("⚠️  Constituents missing a price on rebalance date — excluded from this period's weights",
+			"rebalance_date", rebalanceDate, "tickers", missing)
+	}
+	if totalWeightUsed == 0 {
+		return fmt.Errorf("no constituents priced on rebalance date %s", rebalanceDate)
+	}
+
+	// Renormalize remaining weights to sum to 1 if any constituent was
+	// dropped for lack of a price, then recompute shares against that.
+	for i := range toInsert {
+		toInsert[i].weight = toInsert[i].weight / totalWeightUsed
+		toInsert[i].shares = (toInsert[i].weight * indexValueAtRebalance) / prices[toInsert[i].ticker]
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	for _, s := range toInsert {
+		id, err := stockID(ctx, db, s.ticker)
+		if err != nil {
+			return fmt.Errorf("stock id for %s: %w", s.ticker, err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO index_shares (rebalance_date, stock_id, weight_pct, index_shares)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (rebalance_date, stock_id) DO UPDATE
+				SET weight_pct = EXCLUDED.weight_pct,
+				    index_shares = EXCLUDED.index_shares
+		`, rebalanceDate, id, s.weight*100, s.shares)
+		if err != nil {
+			return fmt.Errorf("insert index_shares for %s: %w", s.ticker, err)
+		}
+		slog.Info("⚖️  Weight set", "rebalance_date", rebalanceDate, "ticker", s.ticker,
+			"weight_pct", fmt.Sprintf("%.3f%%", s.weight*100))
+	}
+
+	return tx.Commit(ctx)
+}
+
+// ── getActiveShares ───────────────────────────────────────────────────────────
+
+// getActiveShares returns the index_shares in effect for asOfDate — i.e.
+// those stored under the latest rebalance_date <= asOfDate.
+func getActiveShares(ctx context.Context, db *pgxpool.Pool, asOfDate string) (map[string]float64, string, error) {
+	period := activeRebalanceDate(asOfDate)
+	if period == "" {
+		return nil, "", fmt.Errorf("no rebalance period covers %s (before inception %s)", asOfDate, BASE_DATE)
+	}
+
+	rows, err := db.Query(ctx, `
+		SELECT s.ticker, idx.index_shares
+		FROM index_shares idx
+		JOIN stocks s ON s.id = idx.stock_id
+		WHERE idx.rebalance_date = $1
+	`, period)
+	if err != nil {
+		return nil, period, err
+	}
+	defer rows.Close()
+
+	shares := make(map[string]float64)
+	for rows.Next() {
+		var ticker string
+		var sh float64
+		if err := rows.Scan(&ticker, &sh); err != nil {
+			continue
+		}
+		shares[ticker] = sh
+	}
+	if err := rows.Err(); err != nil {
+		return nil, period, err
+	}
+	if len(shares) == 0 {
+		return nil, period, fmt.Errorf("index_shares not yet computed for rebalance period %s", period)
+	}
+	return shares, period, nil
+}
+
+// ── computeIndexValue ─────────────────────────────────────────────────────────
+
+// computeIndexValue = Σ( index_shares_i × price_i(date) ), using whichever
+// rebalance period is active on `date`. No re-derivation of weights here —
+// that only happens in setIndexShares, on rebalance dates.
+func computeIndexValue(ctx context.Context, db *pgxpool.Pool, date string) (float64, error) {
+	shares, period, err := getActiveShares(ctx, db, date)
+	if err != nil {
+		return 0, err
+	}
+	prices, err := getPricesOnDate(ctx, db, date)
+	if err != nil {
+		return 0, err
+	}
+	if len(prices) == 0 {
+		return 0, fmt.Errorf("no prices for %s", date)
+	}
+
+	var value float64
+	var missing []string
+	for ticker, sh := range shares {
+		price, ok := prices[ticker]
+		if !ok || price <= 0 {
+			missing = append(missing, ticker)
+			continue
+		}
+		value += sh * price
+	}
+	if len(missing) > 0 {
+		slog.Warn("⚠️  Missing today's price for some constituents — index computed on remainder",
+			"date", date, "period", period, "tickers", missing)
+	}
+	if value == 0 {
+		return 0, fmt.Errorf("index value is zero for %s — no priced constituents", date)
+	}
+	return value, nil
+}
+
+// ── calculateAndSaveIndex ─────────────────────────────────────────────────────
+
+func calculateAndSaveIndex(ctx context.Context, db *pgxpool.Pool, date string) error {
+	// Inception: force index = 100 and derive the FIRST set of shares
+	// directly from it, per §4.4 (S_i,0 = w_i,0 × 100 / P_i,0).
+	if date == BASE_DATE {
+		if err := setIndexShares(ctx, db, BASE_DATE, BASE_INDEX); err != nil {
+			return fmt.Errorf("inception shares: %w", err)
+		}
+		return saveIndexValue(ctx, db, date, BASE_INDEX)
+	}
+
+	// Regular day: compute using whichever shares are currently active.
+	value, err := computeIndexValue(ctx, db, date)
+	if err != nil {
+		return err
+	}
+	if err := saveIndexValue(ctx, db, date, value); err != nil {
+		return err
+	}
+
+	// If `date` is itself a rebalance date, the value just computed and
+	// saved (using the OLD shares) becomes the anchor for the NEW shares —
+	// this is what keeps the series continuous across the reset: same day,
+	// same price, same index level, only the going-forward weights change.
+	if isRebalanceDate(date) {
+		slog.Info("🔄 Rebalance date reached — resetting index shares", "date", date)
+		if err := setIndexShares(ctx, db, date, value); err != nil {
+			return fmt.Errorf("rebalance shares on %s: %w", date, err)
+		}
+	}
+
+	return nil
+}
+
+// ── saveIndexValue ────────────────────────────────────────────────────────────
+
+func saveIndexValue(ctx context.Context, db *pgxpool.Pool, date string, value float64) error {
+	var prevValue float64
+	var hasPrev bool
+	err := db.QueryRow(ctx, `
+		SELECT index_value FROM index_values
+		WHERE price_date < $1
+		ORDER BY price_date DESC
+		LIMIT 1
+	`, date).Scan(&prevValue)
+	switch {
+	case err == nil:
+		hasPrev = true
+	case err == pgx.ErrNoRows:
+		hasPrev = false
+	default:
+		return fmt.Errorf("lookup previous index value: %w", err) // real DB error — don't silently default
+	}
+
+	dailyChange := 0.0
+	if hasPrev {
+		dailyChange = value - prevValue
+	}
+
+	_, err = db.Exec(ctx, `
+		INSERT INTO index_values (price_date, index_value, daily_change)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (price_date) DO UPDATE
+			SET index_value = EXCLUDED.index_value,
+			    daily_change = EXCLUDED.daily_change
+	`, date, value, dailyChange)
+	if err != nil {
+		return fmt.Errorf("index save: %w", err)
+	}
+
+	slog.Info("📊 Index saved", "date", date, "value", fmt.Sprintf("%.4f", value),
+		"change", fmt.Sprintf("%+.4f", dailyChange))
+	return nil
 }
 
 // ── getMissingIndexDates ──────────────────────────────────────────────────────
@@ -426,10 +602,8 @@ func getMissingIndexDates(ctx context.Context, db *pgxpool.Pool) ([]string, erro
 		FROM prices p
 		JOIN stocks s ON s.id = p.stock_id
 		WHERE s.active = TRUE
-		  AND p.price_date > $1
-		  AND p.price_date NOT IN (
-			SELECT price_date FROM index_values
-		  )
+		  AND p.price_date >= $1
+		  AND p.price_date NOT IN (SELECT price_date FROM index_values)
 		ORDER BY p.price_date ASC
 	`, BASE_DATE)
 	if err != nil {
@@ -443,8 +617,7 @@ func getMissingIndexDates(ctx context.Context, db *pgxpool.Pool) ([]string, erro
 		if err := rows.Scan(&d); err != nil {
 			continue
 		}
-		dates = append(dates, d.Format("2006-01-02"))
+		dates = append(dates, d.Format(DATE_LAYOUT))
 	}
-	return dates, nil
+	return dates, rows.Err()
 }
-

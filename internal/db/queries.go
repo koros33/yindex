@@ -39,7 +39,7 @@ func GetIndexLatest(ctx context.Context, db *pgxpool.Pool) (*models.IndexLatest,
 	var iv models.IndexLatest
 	err := db.QueryRow(ctx, `
 		SELECT price_date, index_value, COALESCE(daily_change, 0)
-		FROM momentum_index_values
+		FROM index_values
 		ORDER BY price_date DESC
 		LIMIT 1
 	`).Scan(&iv.Date, &iv.IndexValue, &iv.DailyChange)
@@ -60,7 +60,7 @@ func GetIndexHistory(ctx context.Context, db *pgxpool.Pool, period string) ([]mo
 	}
 	rows, err := db.Query(ctx, `
 		SELECT price_date, index_value, COALESCE(daily_change, 0)
-		FROM momentum_index_values
+		FROM index_values
 		WHERE price_date >= $1
 		ORDER BY price_date ASC
 	`, from)
@@ -89,19 +89,19 @@ func GetIndexStats(ctx context.Context, db *pgxpool.Pool) (*models.IndexStats, e
 	// ── FIX: actually scan the result ────────────────────────────────────────
 	err := db.QueryRow(ctx, `
 		WITH latest AS (
-			SELECT index_value FROM momentum_index_values ORDER BY price_date DESC LIMIT 1
+			SELECT index_value FROM index_values ORDER BY price_date DESC LIMIT 1
 		),
 		base AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date = $1 LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date = $1 LIMIT 1
 		),
 		ytd_start AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date >= $2 ORDER BY price_date ASC LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date >= $2 ORDER BY price_date ASC LIMIT 1
 		),
 		one_month AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date >= $3 ORDER BY price_date ASC LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date >= $3 ORDER BY price_date ASC LIMIT 1
 		),
 		extremes AS (
-			SELECT MAX(index_value) AS high, MIN(index_value) AS low FROM momentum_index_values
+			SELECT MAX(index_value) AS high, MIN(index_value) AS low FROM index_values
 		)
 		SELECT
 			latest.index_value,
@@ -304,7 +304,7 @@ func GetIndexLatest(ctx context.Context, db *pgxpool.Pool) (*models.IndexLatest,
 	var iv models.IndexLatest
 	err := db.QueryRow(ctx, `
 		SELECT price_date, index_value, COALESCE(daily_change, 0)
-		FROM momentum_index_values
+		FROM index_values
 		ORDER BY price_date DESC
 		LIMIT 1
 	`).Scan(&iv.Date, &iv.IndexValue, &iv.DailyChange)
@@ -325,7 +325,7 @@ func GetIndexHistory(ctx context.Context, db *pgxpool.Pool, period string) ([]mo
 	}
 	rows, err := db.Query(ctx, `
 		SELECT price_date, index_value, COALESCE(daily_change, 0)
-		FROM momentum_index_values
+		FROM index_values
 		WHERE price_date >= $1
 		ORDER BY price_date ASC
 	`, from)
@@ -354,19 +354,19 @@ func GetIndexStats(ctx context.Context, db *pgxpool.Pool) (*models.IndexStats, e
 	// ── FIX: actually scan the result ────────────────────────────────────────
 	err := db.QueryRow(ctx, `
 		WITH latest AS (
-			SELECT index_value FROM momentum_index_values ORDER BY price_date DESC LIMIT 1
+			SELECT index_value FROM index_values ORDER BY price_date DESC LIMIT 1
 		),
 		base AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date = $1 LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date = $1 LIMIT 1
 		),
 		ytd_start AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date >= $2 ORDER BY price_date ASC LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date >= $2 ORDER BY price_date ASC LIMIT 1
 		),
 		one_month AS (
-			SELECT index_value FROM momentum_index_values WHERE price_date >= $3 ORDER BY price_date ASC LIMIT 1
+			SELECT index_value FROM index_values WHERE price_date >= $3 ORDER BY price_date ASC LIMIT 1
 		),
 		extremes AS (
-			SELECT MAX(index_value) AS high, MIN(index_value) AS low FROM momentum_index_values
+			SELECT MAX(index_value) AS high, MIN(index_value) AS low FROM index_values
 		)
 		SELECT
 			latest.index_value,
