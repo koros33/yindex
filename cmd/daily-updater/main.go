@@ -19,10 +19,11 @@ import (
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const (
-	MANSA_BASE_URL  = "https://mansaapi.com/api/v1/markets/exchanges/NSE/stocks"
+	MANSA_BASE_URL  = "https://mansaapi.com/api/v1/markets/exchanges/NSE/stocks?limit=100"
 	DATE_LAYOUT     = "2006-01-02"
 	BASE_DATE       = "2026-09-14" // inception — index = 100 here
 	BASE_INDEX      = 100.0
+
 	REQUEST_TIMEOUT = 60 * time.Second
 )
 
